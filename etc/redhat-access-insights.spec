@@ -3,7 +3,7 @@
 
 Name:                   redhat-access-insights
 Summary:                Uploads Insights information to Red Hat on a periodic basis
-Version:                1.0.3
+Version:                1.0.5
 Release:                0%{?dist}
 Source0:                https://github.com/redhataccess/redhat-access-insights/archive/redhat-access-insights-%{version}.tar.gz
 Epoch:                  0
@@ -16,9 +16,10 @@ Obsoletes: redhat-access-proactive
 
 Requires: python
 Requires: python-setuptools
-Requires: python-requests >= 2.4
+Requires: python-requests >= 2.6
 Requires: python-magic
 Requires: libcgroup
+Requires: tar
 Requires: pciutils
 %if 0%{?rhel} && 0%{?rhel} > 6
 Requires: libcgroup-tools
@@ -39,10 +40,10 @@ test "x$RPM_BUILD_ROOT" != "x" && rm -rf $RPM_BUILD_ROOT
 %{__python} setup.py install --root=$RPM_BUILD_ROOT $PREFIX
 
 %post
-#Migrate existing config if we can
-if  [ -f "/etc/redhat_access_proactive/redhat_access_proactive.conf" ]; then
+#Migrate existing machine-id
+if  [ -f "/etc/redhat_access_proactive/machine-id" ]; then
 mkdir -p /etc/redhat-access-insights/
-sed 's/redhat_access_proactive/redhat-access-insights/' /etc/redhat_access_proactive/redhat_access_proactive.conf > /etc/redhat-access-insights/redhat-access-insights.conf
+mv /etc/redhat_access_proactive/machine-id /etc/redhat-access-insights/machine-id
 fi
 
 %postun
@@ -66,6 +67,7 @@ test "x$RPM_BUILD_ROOT" != "x" && rm -rf $RPM_BUILD_ROOT
 /etc/redhat-access-insights/.fallback.json
 /etc/redhat-access-insights/.fallback.json.asc
 /etc/redhat-access-insights/redhattools.pub.gpg
+/etc/redhat-access-insights/.exp.sed
 /etc/redhat-access-insights/*.pem
 
 %defattr(-,root,root)
@@ -74,10 +76,21 @@ test "x$RPM_BUILD_ROOT" != "x" && rm -rf $RPM_BUILD_ROOT
 
 %doc
 /usr/share/man/man8/*.8.gz
+/usr/share/man/man5/*.5.gz
 
 %changelog
-* Wed May 20 2015 Dan Varga <dvarga@redhat.com> - 1.0.3-0
+* Fri Jun 18 2015 Dan Varga <dvarga@redhat.com> - 1.0.5-0
+- Automatically retry failed uploads when invoked via cron
+- Update python-requests dependency to >= 2.6
+
+* Mon Jun 08 2015 Dan Varga <dvarga@redhat.com> - 1.0.4-0
+- Improved logging of exceptions
+- Redact passwords automatically
+
+* Mon Jun 01 2015 Dan Varga <dvarga@redhat.com> - 1.0.3-0
 - New default URLs
+- New config file format
+- Default to auto configuration
 
 * Mon May 18 2015 Dan Varga <dvarga@redhat.com> - 1.0.2-0
 - Update man pages

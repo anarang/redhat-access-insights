@@ -17,7 +17,7 @@ import requests
 from auto_config import try_auto_configuration
 from utilities import ( validate_remove_file,
                        generate_machine_id)
-from dynamic_config import InsightsConfig
+from collection_rules import InsightsConfig
 from data_collector import DataCollector
 from schedule import InsightsSchedule
 from connection import InsightsConnection
@@ -44,11 +44,12 @@ def parse_config_file():
          'app_name': constants.app_name,
          'auto_config': 'True',
          'authmethod': constants.auth_method,
-         'upload_url': constants.upload_url,
-         'api_url': constants.api_url,
-         'branch_info_url': constants.branch_info_url,
+         'base_url': constants.base_url,
+         'upload_url': None,
+         'api_url': None,
+         'branch_info_url': None,
          'auto_update': 'True',
-         'dynamic_config_url': constants.dynamic_conf_url,
+         'collection_rules_url': None,
          'obfuscate': 'False',
          'obfuscate_hostname': 'False',
          'cert_verify': constants.default_ca_file,
@@ -68,7 +69,7 @@ def parse_config_file():
     return parsedconfig
 
 
-def set_up_logging(config, verbose):
+def set_up_logging(config, options):
     """
     Initialize Logging
     """
@@ -84,11 +85,14 @@ def set_up_logging(config, verbose):
 
     # Send anything INFO+ to stdout and log
     stdout_handler = logging.StreamHandler(sys.stdout)
-    if not verbose:
+    if not options.verbose:
         stdout_handler.setLevel(logging.INFO)
+    if options.quiet:
+        stdout_handler.setLevel(logging.ERROR)
+    if not options.silent:
+        logging.root.addHandler(stdout_handler)
 
     logging.root.addHandler(handler)
-    logging.root.addHandler(stdout_handler)
 
     formatter = logging.Formatter(LOG_FORMAT)
     handler.setFormatter(formatter)
@@ -134,7 +138,6 @@ def collect_data_and_upload(config, options):
     All the heavy lifting done here
     """
     pconn = InsightsConnection(config)
-    pconn.check_registration()
     try:
         branch_info = pconn.branch_info()
     except requests.ConnectionError:
@@ -146,16 +149,16 @@ def collect_data_and_upload(config, options):
     pc = InsightsConfig(config, pconn)
     dc = DataCollector()
     start = time.clock()
-    dynamic_config, rm_conf = pc.get_conf(options.update)
+    collection_rules, rm_conf = pc.get_conf(options.update)
     elapsed = (time.clock() - start)
-    logger.debug("Dynamic Config Elapsed Time: %s", elapsed)
+    logger.debug("Collection Rules Elapsed Time: %s", elapsed)
     start = time.clock()
     logger.info('Starting to collect Insights data')
-    dc.run_commands(dynamic_config, rm_conf)
+    dc.run_commands(collection_rules, rm_conf)
     elapsed = (time.clock() - start)
     logger.debug("Command Collection Elapsed Time: %s", elapsed)
     start = time.clock()
-    dc.copy_files(dynamic_config, rm_conf)
+    dc.copy_files(collection_rules, rm_conf)
     elapsed = (time.clock() - start)
     logger.debug("File Collection Elapsed Time: %s", elapsed)
     dc.write_branch_info(branch_info)
@@ -166,9 +169,21 @@ def collect_data_and_upload(config, options):
         if not options.no_upload:
             logger.info('Uploading Insights data,'
                         ' this may take a few minutes')
-            pconn.upload_archive(tar_file)
-            logger.info(
-                'Check https://access.redhat.com/labs/insights in an hour')
+            for tries in range(options.retries):
+                status = pconn.upload_archive(tar_file)
+                if status == 201:
+                    logger.info("Upload completed successfully!")
+                    break
+                else:
+                    logger.error("Upload attempt %d of %d failed! Status Code: %s",
+                                tries+1, options.retries, status)
+                    if tries +1 != options.retries:
+                        logger.info("Waiting %d seconds then retrying", constants.sleep_time)
+                        time.sleep(constants.sleep_time)
+                    else:
+                        logger.error("All attempts to upload have failed!")
+                        logger.error("Please see %s for additional information", constants.default_log_file)
+
             if not obfuscate and not options.keep_archive:
                 dc.archive.delete_tmp_dir()
             else:
@@ -233,42 +248,58 @@ def set_up_options(parser):
                       action="store_true",
                       dest="register",
                       default=False)
+    parser.add_option('--unregister',
+                      help=('Unregister system from the Red Hat '
+                            'Access Insights Service'),
+                      action="store_true",
+                      dest="unregister",
+                      default=False)
     parser.add_option('--update-collection-rules',
                       help='Refresh collection rules from Red Hat',
                       action="store_true",
                       dest="update",
                       default=False)
-    parser.add_option('--daily',
-                      help=("Set Red Hat Access Insights "
-                            "to collect data once per day"),
-                      action="store_true",
-                      dest="daily",
-                      default=False)
-    parser.add_option('--weekly',
-                      help=("Set Red Hat Access Insights "
-                            "to collect data once per week"),
-                      action="store_true",
-                      dest="weekly",
-                      default=False)
+    parser.add_option('--display-name',
+                      action="store",
+                      help='Display name for this system.  Must be used with --register',
+                      dest="display_name")
     parser.add_option('--group',
                       action="store",
                       help='Group to add this system to during registration',
                       dest="group")
+    parser.add_option('--retry',
+                      action="store",
+                      type="int",
+                      help=('Number of times to retry uploading. %s seconds between tries'
+                            % constants.sleep_time),
+                      default=1,
+                      dest="retries")
     parser.add_option('--validate',
                       help='Validate remove.conf',
                       action="store_true",
                       dest="validate",
                       default=False)
-    parser.add_option('--reregister',
-                      help="Reregister this machine to Red Hat",
+    parser.add_option('--quiet',
+                      help='Only display error messages to stdout',
                       action="store_true",
-                      dest="reregister",
+                      dest="quiet",
+                      default=False)
+    parser.add_option('--silent',
+                      help='Display no messages to stdout',
+                      action="store_true",
+                      dest="silent",
                       default=False)
     group = optparse.OptionGroup(parser, "Debug options")
     group.add_option('--test-connection',
                       help='Test connectivity to Red Hat',
                       action="store_true",
                       dest="test_connection",
+                      default=False)
+    group.add_option('--force-reregister',
+                      help=("Forcefully reregister this machine to Red Hat. "
+                             "Use only as directed."),
+                      action="store_true",
+                      dest="reregister",
                       default=False)
     group.add_option('--verbose',
                       help="DEBUG output to stdout",
@@ -323,11 +354,8 @@ def _main():
         validate_remove_file()
         sys.exit()
 
-    if options.daily and options.weekly:
-        parser.error("options --daily and --weekly are mutually exclusive")
-
     config = parse_config_file()
-    logger, handler = set_up_logging(config, options.verbose)
+    logger, handler = set_up_logging(config, options)
 
     # Defer logging till it's ready
     logger.debug('invoked with args: %s', options)
@@ -341,7 +369,7 @@ def _main():
 
     # Disable GPG verification
     if options.no_gpg:
-        logger.warn("GPG VERIFICATION DISABLED")
+        logger.warn("WARNING: GPG VERIFICATION DISABLED")
         config.set(APP_NAME, 'gpg', 'False')
 
     # Log config except the password
@@ -365,11 +393,21 @@ def _main():
         pconn = InsightsConnection(config)
         pconn.test_connection()
 
-    # Handle registration and grouping, this is mostly a no-op
+    if options.unregister:
+        pconn = InsightsConnection(config)
+        pconn.unregister()
+        sys.exit()
+
+    # Handle registration, grouping, and display name
     if options.register:
         opt_group = options.group
-        hostname, opt_group = register(config, opt_group)
-        logger.info('Successfully registered %s in group %s', hostname, opt_group)
+        hostname, opt_group, display_name = register(config, options)
+        if options.display_name is None and options.group is None:
+            logger.info('Successfully registered %s', hostname)
+        elif options.display_name is None:
+            logger.info('Successfully registered %s in group %s', hostname, opt_group)
+        else:
+            logger.info('Successfully registered %s as %s in group %s', hostname, display_name, opt_group)
 
     # Check for .unregistered file
     if os.path.isfile(constants.unregistered_file):

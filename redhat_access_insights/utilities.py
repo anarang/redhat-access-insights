@@ -7,6 +7,7 @@ import os
 import sys
 import logging
 import uuid
+import datetime
 from subprocess import Popen, PIPE
 from constants import InsightsConstants as constants
 
@@ -51,16 +52,39 @@ def _write_machine_id(machine_id):
     machine_id_file.close()
 
 
-def write_unregistered_file(date):
+def write_unregistered_file(date=None):
     """
     Write .unregistered out to disk
     """
+    delete_registered_file()
+    rc = 0
+    if date is None:
+        date = datetime.datetime.isoformat(datetime.datetime.now())
+    else:
+        logger.error("This machine has been unregistered")
+        logger.error("Use --register if you would like to re-register this machine")
+        logger.error("Exiting")
+        rc = 1
+
     unreg = file(constants.unregistered_file, 'w')
     unreg.write(str(date))
-    logger.error("This machine has been unregistered")
-    logger.error("Use --register if you would like to re-register this machine")
-    logger.error("Exiting")
-    sys.exit(1)
+    sys.exit(rc)
+
+
+def write_registered_file():
+    """
+    Write .registered out to disk
+    """
+    reg = file(constants.registered_file, 'w')
+    reg.write(datetime.datetime.isoformat(datetime.datetime.now()))
+
+
+def delete_registered_file():
+    """
+    Remove the .registered file if we are doing a register
+    """
+    if os.path.isfile(constants.registered_file):
+        os.remove(constants.registered_file)
 
 
 def delete_unregistered_file():
@@ -69,6 +93,7 @@ def delete_unregistered_file():
     """
     if os.path.isfile(constants.unregistered_file):
         os.remove(constants.unregistered_file)
+    write_registered_file()
 
 
 def generate_machine_id(new=False):
@@ -127,7 +152,9 @@ def write_file_with_text(path, text):
     try:
         os.makedirs(os.path.dirname(path))
     except OSError:
-        logger.debug("Could not create dir for %s", os.path.dirname(path))
+        # This is really chatty
+        # logger.debug("Could not create dir for %s", os.path.dirname(path))
+        pass
 
     file_from_text = open(path, 'w')
     file_from_text.write(text.encode('utf8'))
@@ -139,23 +166,24 @@ def validate_remove_file():
     Validate the remove file
     """
     import stat
-    if not os.path.isfile(constants.dynamic_remove_file):
-        sys.exit("Remove file does not exist")
+    if not os.path.isfile(constants.collection_remove_file):
+        sys.exit("WARN: Remove file does not exist")
     # Make sure permissions are 600
-    mode = stat.S_IMODE(os.stat(constants.dynamic_remove_file).st_mode)
+    mode = stat.S_IMODE(os.stat(constants.collection_remove_file).st_mode)
     if not mode == 0o600:
-        sys.exit("Invalid remove file permissions"
+        sys.exit("ERROR: Invalid remove file permissions"
                  "Expected 0600 got %s" % oct(mode))
     else:
         print "Correct file permissions"
 
-    if os.path.isfile(constants.dynamic_remove_file):
+    if os.path.isfile(constants.collection_remove_file):
         from ConfigParser import RawConfigParser
         parsedconfig = RawConfigParser()
-        parsedconfig.read(constants.dynamic_remove_file)
+        parsedconfig.read(constants.collection_remove_file)
         rm_conf = {}
         for item, value in parsedconfig.items('remove'):
             rm_conf[item] = value.strip().split(',')
+        # Using print here as this could contain sensitive information
         print "Remove file parsed contents"
         print rm_conf
     logger.info("JSON parsed correctly")

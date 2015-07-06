@@ -27,6 +27,8 @@ URLLIB3_LOGGER.setLevel(logging.WARNING)
 URLLIB3_LOGGER = logging.getLogger('requests.packages.urllib3.connectionpool')
 URLLIB3_LOGGER.setLevel(logging.WARNING)
 
+import warnings
+warnings.simplefilter('ignore')
 
 class InsightsConnection(object):
 
@@ -38,9 +40,16 @@ class InsightsConnection(object):
         self.user_agent = constants.user_agent
         self.username = config.get(APP_NAME, "username")
         self.password = config.get(APP_NAME, "password")
+        self.base_url = "https://" + config.get(APP_NAME, "base_url")
         self.upload_url = config.get(APP_NAME, "upload_url")
+        if self.upload_url is None:
+            self.upload_url = self.base_url + "/uploads"
         self.api_url = config.get(APP_NAME, "api_url")
+        if self.api_url is None:
+            self.api_url = self.base_url
         self.branch_info_url = config.get(APP_NAME, "branch_info_url")
+        if self.branch_info_url is None:
+            self.branch_info_url = self.base_url + "/v1/branch_info"
         self.authmethod = config.get(APP_NAME, 'authmethod')
         self.cert_verify = config.get(APP_NAME, "cert_verify")
         if self.cert_verify.lower() == 'false':
@@ -70,8 +79,8 @@ class InsightsConnection(object):
             # HACKY
             try:
                 # Need to make a request that will fail to get proxies set up
-                session.request("GET", "https://api.access.redhat.com")
-            except requests.ConnectionError:
+                session.request("GET", "https://cert-api.access.redhat.com/r/insights")
+            except requests.ConnectionError as e:
                 pass
             # Major hack, requests/urllib3 does not make access to
             # proxy_headers easy
@@ -151,7 +160,8 @@ class InsightsConnection(object):
             endpoint_addr = socket.gethostbyname(
                 endpoint_url.netloc.split(':')[0])
             logger.debug("hostname: %s ip: %s", endpoint_url.netloc, endpoint_addr)
-        except socket.gaierror:
+        except socket.gaierror as e:
+            logger.debug(e)
             logger.error("Could not resolve hostname: %s", endpoint_url.geturl())
         if self.proxies is not None:
             proxy_url = urlparse(self.proxies['https'])
@@ -166,7 +176,8 @@ class InsightsConnection(object):
                 proxy_addr = socket.gethostbyname(
                     proxy_url.netloc.split(':')[0])
                 logger.debug("Proxy hostname: %s ip: %s", proxy_url.netloc, proxy_addr)
-            except socket.gaierror:
+            except socket.gaierror as e:
+                logger.debug(e)
                 logger.error("Could not resolve proxy %s", proxy_url.geturl())
                 traceback.print_exc()
 
@@ -178,7 +189,7 @@ class InsightsConnection(object):
         files = {'file': ("test", "test")}
         url = urlparse(url)
         test_url = url.scheme + "://" + url.netloc
-        for ext in (url.path + '/', '', '/rs', '/rs/telemetry'):
+        for ext in (url.path + '/', '', '/r', '/r/insights'):
             try:
                 logger.info("Testing: %s", test_url + ext)
                 if method is "POST":
@@ -231,48 +242,29 @@ class InsightsConnection(object):
         Bail out if we get a 401 and leave a message
         """
         if req.status_code >= 400:
-            logger.error("Upload failed!")
-            logger.info("HTTP Status Code: %s", req.status_code)
+            logger.error("ERROR: Upload failed!")
+            logger.info("Debug Information:\nHTTP Status Code: %s", req.status_code)
             logger.info("HTTP Status Text: %s", req.reason)
-            logger.debug("HTTP Response Text: %s", req.text)
             if req.status_code == 401:
                 logger.error("Authorization Required.")
                 logger.error("Please ensure correct credentials "
                              "in " + constants.default_conf_file)
+                logger.debug("HTTP Response Text: %s", req.text)
+            if req.status_code == 402:
+                try:
+                    logger.error(req.json()["message"])
+                except LookupError:
+                    logger.error("Got 402 but no message")
+                    logger.debug("HTTP Response Text: %s", req.text)
             if req.status_code == 412:
                 try:
-                    unreg_date = req.json()['unregistered_at']
+                    unreg_date = req.json()["unregistered_at"]
+                    logger.error(req.json()["message"])
                 except LookupError:
-                    unreg_date = "412, but no unreg_date"
+                    unreg_date = "412, but no unreg_date or message"
+                    logger.debug("HTTP Response Text: %s", req.text)
                 write_unregistered_file(unreg_date)
             sys.exit(1)
-
-    def check_registration(self):
-        """
-        Check if we were unregistered
-        """
-        registration_url = self.api_url + '/v1/systems/' + generate_machine_id()
-        logger.debug("Checking registration status: %s", registration_url)
-        system_info = self.session.get(registration_url)
-
-        if system_info.status_code == 404:
-            # This system hasn't been registered and is it's first upload
-            return
-        elif system_info.status_code == 200:
-            system_info = system_info.json()
-            logger.debug("System info: %s", json.dumps(system_info))
-        else:
-            self.handle_fail_rcs(system_info)
-            logger.error("Could not check blacklist")
-            sys.exit(1)
-
-        try:
-            if system_info['unregistered_at']:
-                write_unregistered_file(system_info['unregistered_at'])
-            else:
-                logger.debug("This machine is registered")
-        except LookupError:
-            logger.debug("This machine is registered")
 
     def get_satellite5_info(self, branch_info):
         """
@@ -292,7 +284,7 @@ class InsightsConnection(object):
                     logger.debug("Found leaf id: %s", leaf_id)
                     branch_info['remote_leaf'] = leaf_id
             if leaf_id is None:
-                raise Exception("Could not determine leaf_id!  Exiting!")
+                sys.exit("Could not determine leaf_id!  Exiting!")
 
     def branch_info(self):
         """
@@ -301,7 +293,10 @@ class InsightsConnection(object):
         logger.debug("Obtaining branch information from %s", self.branch_info_url)
         branch_info = self.session.get(self.branch_info_url)
         logger.debug("GET branch_info status: %s", branch_info.status_code)
-        logger.debug("Branch information: %s", json.dumps(branch_info.json()))
+        try:
+            logger.debug("Branch information: %s", json.dumps(branch_info.json()))
+        except ValueError:
+            raise LookupError
         branch_info = branch_info.json()
 
         # Determine if we are connected to Satellite 5
@@ -311,7 +306,7 @@ class InsightsConnection(object):
 
         return branch_info
 
-    def create_system(self, new_machine_id=False):
+    def create_system(self, options, new_machine_id=False):
         """
         Create the machine via the API
         """
@@ -329,7 +324,8 @@ class InsightsConnection(object):
             logger.error("Could not register system, running configuration test")
             self.test_connection()
 
-        except requests.ConnectionError:
+        except requests.ConnectionError as e:
+            logger.debug(e)
             logger.error("ERROR: Could not determine branch information, exiting!")
             logger.error("See %s for more information", constants.default_log_file)
             logger.error("Could not register system, running configuration test")
@@ -339,6 +335,8 @@ class InsightsConnection(object):
                 'remote_branch': remote_branch,
                 'remote_leaf': remote_leaf,
                 'hostname': client_hostname}
+        if options.display_name is not None:
+            data['display_name'] = options.display_name
         data = json.dumps(data)
         headers = {'Content-Type': 'application/json'}
         post_system_url = self.api_url + '/v1/systems'
@@ -350,7 +348,8 @@ class InsightsConnection(object):
                                        headers=headers,
                                        data=data)
             logger.debug("POST System status: %d", system.status_code)
-        except requests.ConnectionError:
+        except requests.ConnectionError as e:
+            logger.debug(e)
             logger.error("Could not register system, running configuration test")
             self.test_connection()
         return system
@@ -391,7 +390,21 @@ class InsightsConnection(object):
         logger.debug("PUT group status: %d", put_group.status_code)
         logger.debug("PUT Group: %s", put_group.json())
 
-    def register(self, group_id=None):
+    def unregister(self):
+        """
+        Unregister this system from the insights service
+        """
+        machine_id = generate_machine_id()
+        try:
+            logger.debug("Unregistering %s", machine_id)
+            self.session.delete(self.api_url + "/v1/systems/" + machine_id)
+            logger.info("Successfully unregistered from the Red Hat Access Insights Service")
+            write_unregistered_file()
+        except requests.ConnectionError as e:
+            logger.debug(e)
+            logger.error("Could not unregister this system")
+
+    def register(self, options):
         """
         Register this machine
         """
@@ -401,23 +414,25 @@ class InsightsConnection(object):
         client_hostname = determine_hostname()
         # This will undo a blacklist
         logger.debug("API: Create system")
-        system = self.create_system(new_machine_id=False)
+        system = self.create_system(options, new_machine_id=False)
 
         # If we get a 409, we know we need to generate a new machine-id
         if system.status_code == 409:
-            system = self.create_system(new_machine_id=True)
+            system = self.create_system(options, new_machine_id=True)
         self.handle_fail_rcs(system)
 
         logger.debug("System: %s", system.json())
 
         # Do grouping
-        if group_id is not None:
-            self.do_group(group_id)
+        if options.group is not None:
+            self.do_group(options.group)
 
-        if group_id is not None:
-            return (client_hostname, group_id)
+        if options.group is not None:
+            return (client_hostname, options.group, options.display_name)
+        elif options.display_name is not None:
+            return (client_hostname, "None", options.display_name)
         else:
-            return (client_hostname, "None")
+            return (client_hostname, "None", "")
 
     def upload_archive(self, data_collected):
         """
@@ -430,9 +445,7 @@ class InsightsConnection(object):
         logger.debug("Uploading %s to %s", data_collected, upload_url)
         upload = self.session.post(upload_url, files=files)
 
-        self.handle_fail_rcs(upload)
         logger.debug("Upload status: %s %s %s",
                      upload.status_code, upload.reason, upload.text)
         logger.debug("Upload duration: %s", upload.elapsed)
-        logger.info("Upload completed successfully!")
         return upload.status_code
